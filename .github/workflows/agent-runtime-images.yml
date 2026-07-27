@@ -25,6 +25,8 @@ env:
 
 jobs:
   build-and-sign:
+    # Fork guard: pushes signed images to ghcr.io/paperclipai. Skips on forks.
+    if: github.repository_owner == 'paperclipai'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
