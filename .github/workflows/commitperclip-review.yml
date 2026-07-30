@@ -36,6 +36,10 @@ jobs:
 
       - name: Generate commitperclip token
         id: token
+        # Fork guard: COMMITPERCLIP_KEY is a paperclipai org secret the fork
+        # lacks, so this step (and the gates that use its token) only run
+        # upstream. Dependency Review above still runs on forks.
+        if: github.repository_owner == 'paperclipai'
         run: |
           TOKEN=$(node .github/scripts/get-bot-token.mjs)
           echo "::add-mask::$TOKEN"
@@ -45,7 +49,7 @@ jobs:
 
       - name: Run quality gates
         id: quality
-        if: github.event.pull_request.user.login != 'dependabot[bot]'
+        if: github.repository_owner == 'paperclipai' && github.event.pull_request.user.login != 'dependabot[bot]'
         run: node .github/scripts/run-quality-gates.mjs
         continue-on-error: true
         env:
@@ -56,6 +60,7 @@ jobs:
           PR_BRANCH: ${{ github.event.pull_request.head.ref }}
 
       - name: Run security gates
+        if: github.repository_owner == 'paperclipai'
         run: node .github/scripts/check-pr-security.mjs
         continue-on-error: true
         timeout-minutes: 3
@@ -67,6 +72,7 @@ jobs:
 
       - name: Fail if quality gates failed
         if: >-
+          github.repository_owner == 'paperclipai' &&
           github.event.pull_request.user.login != 'dependabot[bot]' &&
           steps.quality.outcome == 'failure'
         run: |
