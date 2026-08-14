@@ -487,6 +487,17 @@ eval "$(pnpm paperclipai worktree env)"
 
 For project execution worktrees, Paperclip can also run a project-defined provision command after it creates or reuses an isolated git worktree. Configure this on the project's execution workspace policy (`workspaceStrategy.provisionCommand`). The command runs inside the derived worktree and receives `PAPERCLIP_WORKSPACE_*`, `PAPERCLIP_PROJECT_ID`, `PAPERCLIP_AGENT_ID`, and `PAPERCLIP_ISSUE_*` environment variables so each repo can bootstrap itself however it wants.
 
+## Fleet Run Concurrency Cap
+
+Each agent has a per-agent concurrency limit (`heartbeat.maxConcurrentRuns`, default `20`), but by default nothing bounds the **total** number of agent runs executing at once on a host. On small droplets an N-agent burst can co-execute enough runs to drive the box into swap/thrash (see GOL-520 / GOL-1506).
+
+Set `PAPERCLIP_MAX_CONCURRENT_RUNS` in the `paperclip-server` runtime env to cap the company-wide count of simultaneously **running** heartbeat runs:
+
+- `PAPERCLIP_MAX_CONCURRENT_RUNS=5` — no more than 5 runs execute at once; excess queued runs stay `queued` (deferred, never dropped) and are promoted by the periodic `resumeQueuedRuns` sweep as slots free.
+- Unset, empty, non-numeric, or `<= 0` disables the gate (stock upstream behavior). Values are floored and clamped to a `1..1000` safety ceiling.
+
+The gate is a soft throttle enforced at the single queued→running chokepoint (`startNextQueuedRunForAgent`). Because per-agent start locks don't serialize across agents, a simultaneous burst may transiently overshoot the cap by a few runs before converging on the next dispatch tick — it prevents sustained thrash, not instantaneous exactness. Changing the value requires a server restart (it is read from the runtime env).
+
 ## App-Shipped Skills Catalog
 
 The Paperclip app ships a curated catalog of company skills out of the box. The
