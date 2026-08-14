@@ -4905,6 +4905,26 @@ export function resolveHeartbeatSchedulingSuppression(
   return { suppressed: false, reason: null };
 }
 
+// GOL-1506 (GOL-557 lever 1): fleet-wide run-concurrency self-throttle.
+// Upstream Paperclip only bounds concurrency per-agent (heartbeat.maxConcurrentRuns,
+// default 20) — nothing caps the TOTAL number of simultaneously running agent runs on
+// the host. When 6+ agents heartbeat at once the box thrashes (2026-07-19 GOL-520
+// degradation; 2026-08-14 scheduled_retry deadlock / run-ownership 409 walls).
+// `PAPERCLIP_MAX_CONCURRENT_RUNS` caps the company-wide count of runs in "running"
+// state; excess queued runs are DEFERRED (left "queued"), never dropped. Unset,
+// non-numeric, or <= 0 disables the gate and preserves stock upstream behavior.
+export const GLOBAL_MAX_CONCURRENT_RUNS_CLAMP_MAX = 1000;
+
+export function resolveGlobalMaxConcurrentRuns(
+  env: Record<string, string | undefined> = process.env,
+): number | null {
+  const raw = env.PAPERCLIP_MAX_CONCURRENT_RUNS;
+  if (raw === undefined || raw === null || raw.trim() === "") return null;
+  const parsed = Math.floor(Number(raw));
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.min(GLOBAL_MAX_CONCURRENT_RUNS_CLAMP_MAX, parsed);
+}
+
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({
@@ -4912,6 +4932,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   });
   const runtimeEnv = options.runtimeEnv ?? process.env;
   const getSchedulingSuppression = () => resolveHeartbeatSchedulingSuppression(runtimeEnv);
+  const getGlobalMaxConcurrentRuns = () => resolveGlobalMaxConcurrentRuns(runtimeEnv);
 
   const runLogStore = getRunLogStore();
   const secretsSvc = secretService(db);
@@ -8991,6 +9012,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(count ?? 0);
   }
 
+  // GOL-1506: company-wide count of currently running agent runs, used by the
+  // fleet-concurrency gate in startNextQueuedRunForAgent.
+  async function countRunningRunsForCompany(companyId: string) {
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.status, "running")));
+    return Number(count ?? 0);
+  }
+
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect, companyAgents?: AgentOrgRow[]) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -9963,8 +9994,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
       const policy = parseHeartbeatPolicy(agent);
       const runningCount = await countRunningRunsForAgent(agentId);
-      const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
+      let availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
       if (availableSlots <= 0) return [];
+
+      // GOL-1506 (GOL-557 lever 1): clamp to the fleet-wide cap so an N-agent burst
+      // can't co-execute enough runs to thrash the host. Counts company-wide running
+      // runs; when the cap is reached the queued runs stay "queued" (deferred, not
+      // dropped) and resumeQueuedRuns promotes them once a slot frees. This is the
+      // sole queued->running chokepoint (executeRun/claimQueuedRun are only reachable
+      // from here), so gating here bounds the whole fleet. The gate is a soft throttle:
+      // per-agent start locks don't serialize across agents, so a burst may transiently
+      // overshoot the cap by a few runs before converging on the next dispatch tick.
+      const globalCap = getGlobalMaxConcurrentRuns();
+      if (globalCap !== null) {
+        const companyRunningCount = await countRunningRunsForCompany(agent.companyId);
+        const globalAvailableSlots = Math.max(0, globalCap - companyRunningCount);
+        if (globalAvailableSlots <= 0) return [];
+        availableSlots = Math.min(availableSlots, globalAvailableSlots);
+      }
 
       const queuedRuns = await db
         .select()
