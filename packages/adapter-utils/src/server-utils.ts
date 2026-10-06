@@ -6,6 +6,7 @@ import path from "node:path";
 import { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
 import { buildSshSpawnTarget, type SshRemoteExecutionSpec } from "./ssh.js";
 import { redactCommandText } from "./command-redaction.js";
+import { sweepLeftoverProcessGroup } from "./leftover-process-group.js";
 import type {
   AdapterSkillEntry,
   AdapterSkillSnapshot,
@@ -2875,6 +2876,30 @@ export async function runChildProcess(
 
         runningProcesses.set(runId, { child, graceSec: opts.graceSec, processGroupId });
 
+        // Nothing may survive its run (AgenticOS GOL-3005). The timeout path
+        // below already signals the whole group; this covers the exit paths that
+        // did not — success, non-zero exit, and spawn error — where a descendant
+        // that outlived the leader (headless Chrome, a backgrounded MCP server)
+        // used to stay alive forever, holding pids and RAM against the
+        // container's limits. No-op when nothing is still running.
+        const sweepRunLeftovers = () => {
+          sweepLeftoverProcessGroup({
+            runId,
+            processGroupId,
+            leaderPid: child.pid ?? null,
+            graceSec: opts.graceSec,
+            onLeftover: (event) => {
+              onLogError(
+                new Error(
+                  `run ${event.runId} left ${event.leftoverPids.length} live process(es) in process group ${event.processGroupId}; sent ${event.signal}`,
+                ),
+                runId,
+                "terminated leftover processes from a finished run",
+              );
+            },
+          });
+        };
+
         let timedOut = false;
         let stdout = "";
         let stderr = "";
@@ -2985,6 +3010,7 @@ export async function runChildProcess(
           if (timeout) clearTimeout(timeout);
           clearTerminalCleanupTimers();
           runningProcesses.delete(runId);
+          sweepRunLeftovers();
           void target.cleanup?.();
           const errno = (err as NodeJS.ErrnoException).code;
           const pathValue = mergedEnv.PATH ?? mergedEnv.Path ?? "";
@@ -3003,6 +3029,7 @@ export async function runChildProcess(
           if (timeout) clearTimeout(timeout);
           clearTerminalCleanupTimers();
           runningProcesses.delete(runId);
+          sweepRunLeftovers();
           void logChain.finally(() => {
             void Promise.resolve()
               .then(() => target.cleanup?.())
