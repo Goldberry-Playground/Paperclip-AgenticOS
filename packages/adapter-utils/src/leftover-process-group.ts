@@ -14,6 +14,11 @@
 // into a zombie, so without a reaper as PID 1 the pid is still held. Pair this
 // with the init reaper to get the pid budget back as well as the RAM/threads.
 //
+// A process that must deliberately outlive its run (for example the sandbox
+// callback bridge, which a short start command launches in the background) has
+// to leave the run's process group, e.g. with `setsid`. Anything still running
+// in the group when the run exits is treated as leaked and terminated.
+//
 // Safety against pgid reuse: the process-group id is always the leader's pid, and
 // Linux will not recycle a pid while it is still in use as the pgid of a
 // non-empty process group. So once the leader has been reaped, `kill(-pgid, …)`

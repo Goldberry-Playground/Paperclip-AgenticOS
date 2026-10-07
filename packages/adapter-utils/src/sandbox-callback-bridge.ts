@@ -908,16 +908,24 @@ export async function startSandboxCallbackBridgeServer(input: {
     maxBodyBytes: input.maxBodyBytes,
   });
   const nodeCommand = input.nodeCommand?.trim() || "node";
+  // The bridge must outlive this start command. A runner that executes locally
+  // through `runChildProcess` terminates anything still running in the command's
+  // process group once it exits (see leftover-process-group.ts), so the bridge
+  // is launched from a foreground `setsid` (when available): by the time this
+  // command returns, the bridge is already in its own session and out of reach.
+  const launchBridge =
+    `nohup ${shellQuote(nodeCommand)} ${shellQuote(remoteEntrypoint)} ` +
+    `>> ${shellQuote(directories.logFile)} 2>&1 < /dev/null & ` +
+    `printf '%s\\n' "$!" > ${shellQuote(directories.pidFile)}`;
   const startResult = await input.runner.execute({
     command: shellCommand,
     args: shellCommandArgs(
       [
         `mkdir -p ${shellQuote(directories.requestsDir)} ${shellQuote(directories.responsesDir)} ${shellQuote(directories.logsDir)}`,
         `rm -f ${shellQuote(directories.readyFile)} ${shellQuote(directories.pidFile)}`,
-        `nohup ${shellQuote(nodeCommand)} ${shellQuote(remoteEntrypoint)} ` +
-          `>> ${shellQuote(directories.logFile)} 2>&1 < /dev/null &`,
-        "pid=$!",
-        `printf '%s\\n' \"$pid\" > ${shellQuote(directories.pidFile)}`,
+        "if command -v setsid >/dev/null 2>&1; then detach=setsid; else detach=; fi",
+        `$detach ${shellCommand} -c ${shellQuote(launchBridge)}`,
+        `pid=$(cat ${shellQuote(directories.pidFile)})`,
         "printf '{\"pid\":%s}\\n' \"$pid\"",
       ].join("\n"),
     ),
