@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -123,6 +123,31 @@ async function waitForHeartbeatIdle(db: Db, timeoutMs = 5_000) {
   while (Date.now() < deadline) {
     const runs = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns);
     if (!runs.some((run) => run.status === "queued" || run.status === "running")) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+// A run can reach a terminal status before its trailing activity_log /
+// heartbeat_run_events writes land. Deleting heartbeat_runs while one of those
+// is in flight trips activity_log_run_id_heartbeat_runs_id_fk, so wait until
+// the side-effect row counts hold still for a quiet window before cleanup.
+async function waitForHeartbeatSideEffectsSettled(db: Db, timeoutMs = 5_000, quietMs = 300) {
+  await waitForHeartbeatIdle(db, timeoutMs);
+  const deadline = Date.now() + timeoutMs;
+  let previous = "";
+  let stableSince = Date.now();
+  while (Date.now() < deadline) {
+    const [activity, events] = await Promise.all([
+      db.select({ count: sql<number>`count(*)` }).from(activityLog),
+      db.select({ count: sql<number>`count(*)` }).from(heartbeatRunEvents),
+    ]);
+    const current = `${activity[0]?.count ?? 0}:${events[0]?.count ?? 0}`;
+    if (current !== previous) {
+      previous = current;
+      stableSince = Date.now();
+    } else if (Date.now() - stableSince >= quietMs) {
+      return;
+    }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }
@@ -620,7 +645,7 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
   }, 20_000);
 
   afterEach(async () => {
-    await waitForHeartbeatIdle(db);
+    await waitForHeartbeatSideEffectsSettled(db);
     adapterExecute.mockReset();
     adapterExecute.mockImplementation(async () => ({
       exitCode: 0,

@@ -41,7 +41,37 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     db = createDb(tempDb.connectionString);
   }, 20_000);
 
+  // A run can reach a terminal status before its trailing activity_log /
+  // heartbeat_run_events writes land. Deleting heartbeat_runs while one of those
+  // is in flight trips activity_log_run_id_heartbeat_runs_id_fk, so wait until
+  // no run is active and the side-effect row counts hold still before cleanup.
+  async function waitForHeartbeatSideEffectsSettled(timeoutMs = 5_000, quietMs = 300) {
+    const deadline = Date.now() + timeoutMs;
+    let previous = "";
+    let stableSince = Date.now();
+    while (Date.now() < deadline) {
+      const [active, activity, events] = await Promise.all([
+        db
+          .select({ count: sql<number>`count(*)` })
+          .from(heartbeatRuns)
+          .where(sql`${heartbeatRuns.status} in ('queued', 'running')`),
+        db.select({ count: sql<number>`count(*)` }).from(activityLog),
+        db.select({ count: sql<number>`count(*)` }).from(heartbeatRunEvents),
+      ]);
+      const activeCount = Number(active[0]?.count ?? 0);
+      const current = `${activeCount}:${activity[0]?.count ?? 0}:${events[0]?.count ?? 0}`;
+      if (current !== previous || activeCount > 0) {
+        previous = current;
+        stableSince = Date.now();
+      } else if (Date.now() - stableSince >= quietMs) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
   afterEach(async () => {
+    await waitForHeartbeatSideEffectsSettled();
     await db.delete(heartbeatRunEvents);
     await db.delete(activityLog);
     await db.delete(issueComments);
