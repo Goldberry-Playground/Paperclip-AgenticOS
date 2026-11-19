@@ -1,10 +1,14 @@
 # syntax=docker/dockerfile:1.20
-FROM node:lts-trixie-slim AS base
+# Pinned to a Node major on purpose. The floating `lts` tag moved to Node 26 in
+# late Oct 2026, and Node 25+ no longer bundles corepack, which broke this build
+# (`corepack: not found`). Bump the major deliberately, not by tag drift.
+FROM node:24-trixie-slim AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 \
   && rm -rf /var/lib/apt/lists/* \
+  && (command -v corepack >/dev/null || npm install --global corepack) \
   && corepack enable
 
 # Modify the existing node user/group to have the specified UID/GID to match host user
