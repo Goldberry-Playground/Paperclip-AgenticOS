@@ -1,4 +1,6 @@
-FROM node:lts-trixie-slim
+# Pinned to a Node major, same reason as the root Dockerfile: Node 25+ no longer
+# bundles corepack, and the floating `lts` tag moved past it.
+FROM node:24-trixie-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -17,7 +19,8 @@ RUN apt-get update \
 
 RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
-RUN corepack enable \
+RUN (command -v corepack >/dev/null || npm install --global corepack) \
+  && corepack enable \
   && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest
 
 RUN useradd --create-home --shell /bin/bash reviewer
